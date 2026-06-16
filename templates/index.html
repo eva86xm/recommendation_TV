@@ -54,7 +54,10 @@
     <div class="table">
       {% for screen in screens %}
         <div class="row">
-          <span>{{ screen.name }}</span>
+          <div>
+            <strong>{{ screen.name }}</strong>
+            <span class="screen-code">код: <code>{{ screen.screen_key }}</code></span>
+          </div>
           <div class="actions">
             <a href="{{ url_for('screen_detail', screen_key=screen.screen_key) }}">Настроить</a>
             <a href="{{ url_for('player', screen_key=screen.screen_key) }}" target="_blank">Открыть плеер</a>

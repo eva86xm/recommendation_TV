@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block body %}
 <header class="topbar">
-  {{ brand(screen.name, "расписание для отдельного ТВ") }}
+  {{ brand(screen.name, "код экрана: " ~ screen.screen_key) }}
   <div class="actions">
     <a href="{{ url_for('index') }}">Все экраны</a>
     <a href="{{ url_for('player', screen_key=screen.screen_key) }}" target="_blank">Открыть плеер</a>
@@ -26,21 +26,32 @@
 
   <section class="panel">
     <h2>Добавить в расписание</h2>
-    <form method="post" action="{{ url_for('add_schedule_item') }}" class="grid-form">
+    <form method="post" action="{{ url_for('add_schedule_item') }}" class="grid-form" id="schedule-form">
       <input type="hidden" name="screen_id" value="{{ screen.id }}">
       <label>
         Файл
-        <select name="media_id" required>
+        <select name="media_id" id="media-select" required>
+          <optgroup label="Видео">
+            {% for item in media %}
+              {% if item.kind == "video" %}
+                <option value="{{ item.id }}" data-kind="{{ item.kind }}">{{ item.original_name }}</option>
+              {% endif %}
+            {% endfor %}
+          </optgroup>
+          <optgroup label="Фото">
           {% for item in media %}
-            <option value="{{ item.id }}">{{ item.original_name }} · {{ item.kind }}</option>
+            {% if item.kind == "image" %}
+              <option value="{{ item.id }}" data-kind="{{ item.kind }}">{{ item.original_name }}</option>
+            {% endif %}
           {% endfor %}
+          </optgroup>
         </select>
       </label>
       <label>
         Название
         <input name="title" placeholder="Например: Акция дня">
       </label>
-      <label>
+      <label id="duration-field">
         Длительность картинки, сек
         <input name="duration_seconds" type="number" min="1" value="10">
       </label>
@@ -90,7 +101,11 @@
         <div class="row schedule-row">
           <div>
             <strong>{{ item.title or item.original_name }}</strong>
-            <span>{{ item.kind }} · {{ item.duration_seconds }} сек · порядок {{ item.sort_order }}</span>
+            {% if item.kind == "video" %}
+              <span>видео · до конца ролика · порядок {{ item.sort_order }}</span>
+            {% else %}
+              <span>фото · {{ item.duration_seconds }} сек · порядок {{ item.sort_order }}</span>
+            {% endif %}
           </div>
           <div class="muted">
             {% if item.weekdays %}
@@ -109,4 +124,5 @@
     </div>
   </section>
 </main>
+<script src="{{ url_for('static', filename='admin.js') }}"></script>
 {% endblock %}

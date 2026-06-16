@@ -197,12 +197,22 @@ p {
   width: auto;
 }
 
+.hidden {
+  display: none;
+}
+
 .notice {
   background: #ecfdf3;
   border: 1px solid #abefc6;
   border-radius: 6px;
   color: #067647;
   padding: 10px 12px;
+}
+
+.notice.error {
+  background: #fef3f2;
+  border-color: #fecdca;
+  color: var(--danger);
 }
 
 .table {
@@ -226,8 +236,23 @@ p {
 }
 
 .schedule-row span,
+.screen-code,
 .muted {
   color: var(--muted);
+}
+
+.screen-code {
+  display: block;
+  margin-top: 4px;
+}
+
+code {
+  background: #eef3f1;
+  border: 1px solid #cbd8d3;
+  border-radius: 5px;
+  color: var(--ink);
+  font: 650 13px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  padding: 2px 6px;
 }
 
 .danger {

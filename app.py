@@ -1,6 +1,8 @@
 import os
 import secrets
+import shutil
 import sqlite3
+import subprocess
 from datetime import datetime, time
 from pathlib import Path
 
@@ -12,6 +14,7 @@ BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "instance" / "signage.db"
 UPLOAD_DIR = BASE_DIR / "uploads"
 ALLOWED_EXTENSIONS = {"jpg", "jpeg", "png", "gif", "webp", "mp4", "webm", "mov"}
+VIDEO_EXTENSIONS = {"mp4", "webm", "mov"}
 
 
 def create_app():
@@ -71,9 +74,20 @@ def create_app():
             return redirect(next_url)
 
         original_name = secure_filename(file.filename)
-        stored_name = f"{datetime.utcnow().strftime('%Y%m%d%H%M%S')}_{secrets.token_hex(6)}.{ext}"
-        file.save(UPLOAD_DIR / stored_name)
-        kind = "video" if ext in {"mp4", "webm", "mov"} else "image"
+        kind = "video" if ext in VIDEO_EXTENSIONS else "image"
+        stored_ext = "mp4" if kind == "video" else ext
+        stored_name = f"{datetime.utcnow().strftime('%Y%m%d%H%M%S')}_{secrets.token_hex(6)}.{stored_ext}"
+        stored_path = UPLOAD_DIR / stored_name
+
+        if kind == "video":
+            source_path = UPLOAD_DIR / f"{stored_path.stem}_source.{ext}"
+            file.save(source_path)
+            if convert_video_for_tv(source_path, stored_path):
+                source_path.unlink(missing_ok=True)
+            else:
+                source_path.replace(stored_path)
+        else:
+            file.save(stored_path)
 
         with db() as conn:
             conn.execute(
@@ -114,7 +128,10 @@ def create_app():
     def add_schedule_item():
         require_login()
         form = request.form
+        media_id = int(form["media_id"])
         screen = find_screen_by_id(int(form["screen_id"]))
+        media_item = find_media(media_id)
+        duration_seconds = 0 if media_item and media_item["kind"] == "video" else int(form.get("duration_seconds") or 10)
         with db() as conn:
             conn.execute(
                 """
@@ -124,9 +141,9 @@ def create_app():
                 """,
                 (
                     int(form["screen_id"]),
-                    int(form["media_id"]),
+                    media_id,
                     form.get("title", "").strip(),
-                    int(form.get("duration_seconds") or 10),
+                    duration_seconds,
                     form.get("start_date") or None,
                     form.get("end_date") or None,
                     form.get("start_time") or None,
@@ -170,8 +187,8 @@ def create_app():
         if not name:
             flash("Укажите название экрана")
             return redirect(url_for("index"))
-        key = secrets.token_urlsafe(12)
         with db() as conn:
+            key = generate_screen_key(conn)
             conn.execute("INSERT INTO screens (name, screen_key, created_at) VALUES (?, ?, ?)", (name, key, datetime.utcnow().isoformat()))
         flash("Экран добавлен")
         return redirect(url_for("index"))
@@ -214,6 +231,15 @@ def create_app():
                 (screen["id"],),
             ).fetchall()
         return render_template("screen.html", screen=screen, media=media, schedule=schedule)
+
+    @app.route("/player", methods=["GET", "POST"])
+    def player_lookup():
+        if request.method == "POST":
+            screen_key = request.form.get("screen_key", "").strip()
+            if is_four_digit_code(screen_key) and find_screen(screen_key):
+                return redirect(url_for("player", screen_key=screen_key))
+            flash("Введите 4 цифры из админки")
+        return render_template("player_lookup.html")
 
     @app.get("/player/<screen_key>")
     def player(screen_key):
@@ -299,7 +325,7 @@ def init_db():
         if exists == 0:
             conn.execute(
                 "INSERT INTO screens (name, screen_key, created_at) VALUES (?, ?, ?)",
-                ("Главный экран", "main", datetime.utcnow().isoformat()),
+                ("Главный экран", generate_screen_key(conn), datetime.utcnow().isoformat()),
             )
 
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(schedule_items)").fetchall()}
@@ -308,6 +334,8 @@ def init_db():
             main_screen = conn.execute("SELECT id FROM screens WHERE screen_key = ?", ("main",)).fetchone()
             if main_screen:
                 conn.execute("UPDATE schedule_items SET screen_id = ? WHERE screen_id IS NULL", (main_screen["id"],))
+
+        migrate_screen_keys(conn)
 
 
 def is_logged_in():
@@ -332,6 +360,71 @@ def find_screen_by_id(screen_id):
 def find_media(media_id):
     with db() as conn:
         return conn.execute("SELECT * FROM media WHERE id = ?", (media_id,)).fetchone()
+
+
+def convert_video_for_tv(source_path, output_path):
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        return False
+
+    command = [
+        ffmpeg,
+        "-y",
+        "-i",
+        str(source_path),
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "23",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "128k",
+        "-movflags",
+        "+faststart",
+        str(output_path),
+    ]
+
+    result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return result.returncode == 0 and output_path.exists()
+
+
+def is_four_digit_code(value):
+    return len(value) == 4 and value.isdigit()
+
+
+def generate_screen_key(conn, used_codes=None):
+    used = set(used_codes or [])
+    if not used_codes:
+        used.update(
+            row["screen_key"]
+            for row in conn.execute("SELECT screen_key FROM screens").fetchall()
+            if is_four_digit_code(row["screen_key"])
+        )
+
+    for _ in range(9000):
+        code = str(secrets.randbelow(9000) + 1000)
+        if code not in used:
+            return code
+
+    raise RuntimeError("Не осталось свободных кодов экранов")
+
+
+def migrate_screen_keys(conn):
+    screens = conn.execute("SELECT id, screen_key FROM screens ORDER BY id").fetchall()
+    used_codes = {screen["screen_key"] for screen in screens if is_four_digit_code(screen["screen_key"])}
+
+    for screen in screens:
+        if is_four_digit_code(screen["screen_key"]):
+            continue
+
+        new_code = generate_screen_key(conn, used_codes)
+        used_codes.add(new_code)
+        conn.execute("UPDATE screens SET screen_key = ? WHERE id = ?", (new_code, screen["id"]))
 
 
 def row_to_playlist_item(row):
