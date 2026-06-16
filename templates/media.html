@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block body %}
+<header class="topbar">
+  {{ brand("Просмотр файла", item.original_name) }}
+  <div class="actions">
+    <a href="{{ url_for('index') }}">В админку</a>
+    <form method="post" action="{{ url_for('delete_media', media_id=item.id) }}" onsubmit="return confirm('Удалить файл и убрать его из расписаний?')">
+      <button class="link-danger" type="submit">Удалить</button>
+    </form>
+  </div>
+</header>
+
+<main class="preview-page">
+  <section class="preview-shell">
+    {% if item.kind == "video" %}
+      <video src="{{ url_for('uploaded_file', filename=item.stored_name) }}" controls autoplay muted playsinline></video>
+    {% else %}
+      <img src="{{ url_for('uploaded_file', filename=item.stored_name) }}" alt="{{ item.original_name }}">
+    {% endif %}
+  </section>
+</main>
+{% endblock %}

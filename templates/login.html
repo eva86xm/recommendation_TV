@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block body %}
+<main class="login-shell">
+  <form class="login-card" method="post">
+    <h1>Digital Signage</h1>
+    <p>Вход в панель управления рекламой</p>
+    {% with messages = get_flashed_messages() %}
+      {% if messages %}
+        <div class="notice">{{ messages[0] }}</div>
+      {% endif %}
+    {% endwith %}
+    <label>
+      Пароль администратора
+      <input type="password" name="password" autocomplete="current-password" required autofocus>
+    </label>
+    <button type="submit">Войти</button>
+  </form>
+</main>
+{% endblock %}

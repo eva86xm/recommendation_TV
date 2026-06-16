@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ title or "Signage" }}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  {% macro brand(title, subtitle=None) -%}
+    <div class="brand">
+      <img src="{{ url_for('static', filename='logo.png') }}" alt="ИНП">
+      <div>
+        <strong>{{ title }}</strong>
+        {% if subtitle %}
+          <span>{{ subtitle }}</span>
+        {% endif %}
+      </div>
+    </div>
+  {%- endmacro %}
+  {% block body %}{% endblock %}
+</body>
+</html>

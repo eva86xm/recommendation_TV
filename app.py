@@ -31,9 +31,10 @@ def create_app():
             media = conn.execute("SELECT * FROM media ORDER BY created_at DESC").fetchall()
             schedule = conn.execute(
                 """
-                SELECT s.*, m.original_name, m.kind
+                SELECT s.*, m.original_name, m.kind, sc.name AS screen_name
                 FROM schedule_items s
                 JOIN media m ON m.id = s.media_id
+                LEFT JOIN screens sc ON sc.id = s.screen_id
                 ORDER BY s.sort_order ASC, s.id DESC
                 """
             ).fetchall()
@@ -58,15 +59,16 @@ def create_app():
     @app.post("/media")
     def upload_media():
         require_login()
+        next_url = request.form.get("next") or url_for("index")
         file = request.files.get("file")
         if not file or not file.filename:
             flash("Выберите файл")
-            return redirect(url_for("index"))
+            return redirect(next_url)
 
         ext = file.filename.rsplit(".", 1)[-1].lower()
         if ext not in ALLOWED_EXTENSIONS:
             flash("Поддерживаются картинки и видео: jpg, png, webp, gif, mp4, webm, mov")
-            return redirect(url_for("index"))
+            return redirect(next_url)
 
         original_name = secure_filename(file.filename)
         stored_name = f"{datetime.utcnow().strftime('%Y%m%d%H%M%S')}_{secrets.token_hex(6)}.{ext}"
@@ -79,20 +81,49 @@ def create_app():
                 (original_name, stored_name, kind, datetime.utcnow().isoformat()),
             )
         flash("Файл загружен")
-        return redirect(url_for("index"))
+        return redirect(next_url)
+
+    @app.get("/media/<int:media_id>")
+    def media_detail(media_id):
+        require_login()
+        item = find_media(media_id)
+        if not item:
+            abort(404)
+        return render_template("media.html", item=item)
+
+    @app.post("/media/<int:media_id>/delete")
+    def delete_media(media_id):
+        require_login()
+        next_url = request.form.get("next") or url_for("index")
+        item = find_media(media_id)
+        if not item:
+            abort(404)
+
+        with db() as conn:
+            conn.execute("DELETE FROM schedule_items WHERE media_id = ?", (media_id,))
+            conn.execute("DELETE FROM media WHERE id = ?", (media_id,))
+
+        file_path = UPLOAD_DIR / item["stored_name"]
+        if file_path.exists():
+            file_path.unlink()
+
+        flash("Файл удален")
+        return redirect(next_url)
 
     @app.post("/schedule")
     def add_schedule_item():
         require_login()
         form = request.form
+        screen = find_screen_by_id(int(form["screen_id"]))
         with db() as conn:
             conn.execute(
                 """
                 INSERT INTO schedule_items
-                    (media_id, title, duration_seconds, start_date, end_date, start_time, end_time, weekdays, sort_order, active)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (screen_id, media_id, title, duration_seconds, start_date, end_date, start_time, end_time, weekdays, sort_order, active)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
+                    int(form["screen_id"]),
                     int(form["media_id"]),
                     form.get("title", "").strip(),
                     int(form.get("duration_seconds") or 10),
@@ -106,14 +137,30 @@ def create_app():
                 ),
             )
         flash("Показ добавлен в расписание")
+        if screen:
+            return redirect(url_for("screen_detail", screen_key=screen["screen_key"]))
         return redirect(url_for("index"))
 
     @app.post("/schedule/<int:item_id>/delete")
     def delete_schedule_item(item_id):
         require_login()
+        screen_key = None
         with db() as conn:
+            row = conn.execute(
+                """
+                SELECT sc.screen_key
+                FROM schedule_items s
+                LEFT JOIN screens sc ON sc.id = s.screen_id
+                WHERE s.id = ?
+                """,
+                (item_id,),
+            ).fetchone()
+            if row:
+                screen_key = row["screen_key"]
             conn.execute("DELETE FROM schedule_items WHERE id = ?", (item_id,))
         flash("Пункт расписания удален")
+        if screen_key:
+            return redirect(url_for("screen_detail", screen_key=screen_key))
         return redirect(url_for("index"))
 
     @app.post("/screens")
@@ -128,6 +175,45 @@ def create_app():
             conn.execute("INSERT INTO screens (name, screen_key, created_at) VALUES (?, ?, ?)", (name, key, datetime.utcnow().isoformat()))
         flash("Экран добавлен")
         return redirect(url_for("index"))
+
+    @app.post("/screens/<screen_key>/delete")
+    def delete_screen(screen_key):
+        require_login()
+        screen = find_screen(screen_key)
+        if not screen:
+            abort(404)
+
+        with db() as conn:
+            screen_count = conn.execute("SELECT COUNT(*) AS count FROM screens").fetchone()["count"]
+            if screen_count <= 1:
+                flash("Нельзя удалить последний экран")
+                return redirect(url_for("index"))
+
+            conn.execute("DELETE FROM schedule_items WHERE screen_id = ?", (screen["id"],))
+            conn.execute("DELETE FROM screens WHERE id = ?", (screen["id"],))
+
+        flash("Экран удален")
+        return redirect(url_for("index"))
+
+    @app.get("/screens/<screen_key>")
+    def screen_detail(screen_key):
+        require_login()
+        screen = find_screen(screen_key)
+        if not screen:
+            abort(404)
+        with db() as conn:
+            media = conn.execute("SELECT * FROM media ORDER BY created_at DESC").fetchall()
+            schedule = conn.execute(
+                """
+                SELECT s.*, m.original_name, m.kind
+                FROM schedule_items s
+                JOIN media m ON m.id = s.media_id
+                WHERE s.screen_id = ?
+                ORDER BY s.sort_order ASC, s.id DESC
+                """,
+                (screen["id"],),
+            ).fetchall()
+        return render_template("screen.html", screen=screen, media=media, schedule=schedule)
 
     @app.get("/player/<screen_key>")
     def player(screen_key):
@@ -149,9 +235,10 @@ def create_app():
                 SELECT s.*, m.stored_name, m.original_name, m.kind
                 FROM schedule_items s
                 JOIN media m ON m.id = s.media_id
-                WHERE s.active = 1
+                WHERE s.active = 1 AND s.screen_id = ?
                 ORDER BY s.sort_order ASC, s.id ASC
-                """
+                """,
+                (screen["id"],),
             ).fetchall()
 
         items = [row_to_playlist_item(row) for row in rows if is_active_now(row, now)]
@@ -184,6 +271,7 @@ def init_db():
 
             CREATE TABLE IF NOT EXISTS schedule_items (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                screen_id INTEGER,
                 media_id INTEGER NOT NULL,
                 title TEXT,
                 duration_seconds INTEGER NOT NULL DEFAULT 10,
@@ -194,6 +282,7 @@ def init_db():
                 weekdays TEXT,
                 sort_order INTEGER NOT NULL DEFAULT 100,
                 active INTEGER NOT NULL DEFAULT 1,
+                FOREIGN KEY(screen_id) REFERENCES screens(id),
                 FOREIGN KEY(media_id) REFERENCES media(id)
             );
 
@@ -213,6 +302,13 @@ def init_db():
                 ("Главный экран", "main", datetime.utcnow().isoformat()),
             )
 
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(schedule_items)").fetchall()}
+        if "screen_id" not in columns:
+            conn.execute("ALTER TABLE schedule_items ADD COLUMN screen_id INTEGER")
+            main_screen = conn.execute("SELECT id FROM screens WHERE screen_key = ?", ("main",)).fetchone()
+            if main_screen:
+                conn.execute("UPDATE schedule_items SET screen_id = ? WHERE screen_id IS NULL", (main_screen["id"],))
+
 
 def is_logged_in():
     return session.get("admin") is True
@@ -226,6 +322,16 @@ def require_login():
 def find_screen(screen_key):
     with db() as conn:
         return conn.execute("SELECT * FROM screens WHERE screen_key = ?", (screen_key,)).fetchone()
+
+
+def find_screen_by_id(screen_id):
+    with db() as conn:
+        return conn.execute("SELECT * FROM screens WHERE id = ?", (screen_id,)).fetchone()
+
+
+def find_media(media_id):
+    with db() as conn:
+        return conn.execute("SELECT * FROM media WHERE id = ?", (media_id,)).fetchone()
 
 
 def row_to_playlist_item(row):
