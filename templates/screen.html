@@ -1,10 +1,14 @@
 {% extends "base.html" %}
 {% block body %}
-<header class="topbar">
-  {{ brand(screen.name, "код экрана: " ~ screen.screen_key) }}
-  <div class="actions">
+<header class="topbar app-header">
+  {{ brand(screen.name) }}
+  <nav class="header-nav" aria-label="Действия экрана">
     <a href="{{ url_for('index') }}">Все экраны</a>
     <a href="{{ url_for('player', screen_key=screen.screen_key) }}" target="_blank">Открыть плеер</a>
+  </nav>
+  <div class="header-code">
+    <span>Код экрана</span>
+    <strong>{{ screen.screen_key }}</strong>
   </div>
 </header>
 
@@ -17,36 +21,70 @@
 
   <section class="panel">
     <h2>Загрузить рекламу</h2>
-    <form method="post" action="{{ url_for('upload_media') }}" enctype="multipart/form-data" class="stack">
+    <form method="post" action="{{ url_for('upload_media') }}" enctype="multipart/form-data" class="stack upload-form">
       <input type="hidden" name="next" value="{{ url_for('screen_detail', screen_key=screen.screen_key) }}">
       <input type="file" name="file" accept="image/*,video/*" required>
       <button type="submit">Загрузить</button>
+      {{ upload_progress() }}
     </form>
+    <div class="processing-list">
+      {% for item in media %}
+        {% if item.status != "ready" %}
+          <div class="processing-row" data-media-id="{{ item.id }}" data-media-status="{{ item.status }}">
+            <div>
+              <strong>{{ item.original_name }}</strong>
+              <span>{{ item.kind|kind_label }} · {{ item.file_size|filesize }}</span>
+              {% if item.error_message %}
+                <span class="status-error-text" data-media-error>{{ item.error_message }}</span>
+              {% else %}
+                <span class="status-error-text hidden" data-media-error></span>
+              {% endif %}
+            </div>
+            <span class="status-badge status-{{ item.status }}" data-media-status-label>{{ item.status|status_label }}</span>
+          </div>
+        {% endif %}
+      {% endfor %}
+    </div>
   </section>
 
   <section class="panel">
     <h2>Добавить в расписание</h2>
     <form method="post" action="{{ url_for('add_schedule_item') }}" class="grid-form" id="schedule-form">
       <input type="hidden" name="screen_id" value="{{ screen.id }}">
-      <label>
-        Файл
-        <select name="media_id" id="media-select" required>
-          <optgroup label="Видео">
-            {% for item in media %}
-              {% if item.kind == "video" %}
-                <option value="{{ item.id }}" data-kind="{{ item.kind }}">{{ item.original_name }}</option>
-              {% endif %}
+      <div class="media-picker" data-media-picker>
+        <span class="field-title">Файл</span>
+        <input type="hidden" name="media_id" id="media-select" required>
+        <div class="selected-media">
+          <div>
+            <strong data-selected-media-name>Файл не выбран</strong>
+            <span data-selected-media-meta>Выберите файл из списка</span>
+          </div>
+          <button type="button" class="ghost compact-button" data-toggle-picker>Выбрать</button>
+        </div>
+        <div class="picker-panel hidden" data-picker-panel>
+          <div class="list-tools compact-tools" data-picker-controls>
+            <input type="search" data-picker-search placeholder="Поиск файла">
+            <div class="segmented" role="group" aria-label="Фильтр файлов">
+              <button type="button" class="active" data-picker-kind="all">Все</button>
+              <button type="button" data-picker-kind="video">Видео</button>
+              <button type="button" data-picker-kind="image">Фото</button>
+            </div>
+          </div>
+          <div class="picker-list" data-picker-list>
+            {% for item in ready_media %}
+              <label class="picker-row" data-kind="{{ item.kind }}" data-name="{{ item.original_name|lower }}" data-title="{{ item.original_name }}" data-meta="{{ item.kind|kind_label }} · {{ item.created_at|datetime_ru }}">
+                <input type="radio" name="media_choice" value="{{ item.id }}" data-kind="{{ item.kind }}" {% if loop.first %}checked{% endif %}>
+                <span>
+                  <strong>{{ item.original_name }}</strong>
+                  <small>{{ item.kind|kind_label }} · {{ item.created_at|datetime_ru }} · {{ item.file_size|filesize }}</small>
+                </span>
+              </label>
+            {% else %}
+              <p class="muted">Пока нет готовых файлов.</p>
             {% endfor %}
-          </optgroup>
-          <optgroup label="Фото">
-          {% for item in media %}
-            {% if item.kind == "image" %}
-              <option value="{{ item.id }}" data-kind="{{ item.kind }}">{{ item.original_name }}</option>
-            {% endif %}
-          {% endfor %}
-          </optgroup>
-        </select>
-      </label>
+          </div>
+        </div>
+      </div>
       <label>
         Название
         <input name="title" placeholder="Например: Акция дня">
@@ -70,41 +108,22 @@
         <label><input type="checkbox" name="weekdays" value="6"> Вс</label>
       </fieldset>
       <label class="check"><input type="checkbox" name="active" checked> Активно</label>
-      <button type="submit" {% if not media %}disabled{% endif %}>Добавить</button>
+      <button type="submit" {% if not ready_media %}disabled{% endif %}>Добавить</button>
     </form>
   </section>
 
   <section class="panel wide">
-    <h2>Загруженные файлы</h2>
-    <div class="table">
-      {% for item in media %}
-        <div class="row">
-          <a href="{{ url_for('media_detail', media_id=item.id) }}">{{ item.original_name }}</a>
-          <div class="actions">
-            <span class="muted">{{ item.kind }}</span>
-            <form method="post" action="{{ url_for('delete_media', media_id=item.id) }}" onsubmit="return confirm('Удалить файл и убрать его из расписаний?')">
-              <input type="hidden" name="next" value="{{ url_for('screen_detail', screen_key=screen.screen_key) }}">
-              <button class="link-danger" type="submit">Удалить</button>
-            </form>
-          </div>
-        </div>
-      {% else %}
-        <p class="muted">Пока нет загруженных файлов.</p>
-      {% endfor %}
-    </div>
-  </section>
-
-  <section class="panel wide">
     <h2>Расписание</h2>
-    <div class="table">
+    <div class="table scroll-list compact-list">
       {% for item in schedule %}
         <div class="row schedule-row">
+          <div class="schedule-number">{{ loop.index }}</div>
           <div>
             <strong>{{ item.title or item.original_name }}</strong>
             {% if item.kind == "video" %}
-              <span>видео · до конца ролика · порядок {{ item.sort_order }}</span>
+              <span>{{ item.kind|kind_label }} · до конца ролика · порядок {{ item.sort_order }}</span>
             {% else %}
-              <span>фото · {{ item.duration_seconds }} сек · порядок {{ item.sort_order }}</span>
+              <span>{{ item.kind|kind_label }} · {{ item.duration_seconds }} сек · порядок {{ item.sort_order }}</span>
             {% endif %}
           </div>
           <div class="muted">

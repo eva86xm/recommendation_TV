@@ -11,8 +11,18 @@
 </header>
 
 <main class="preview-page">
+  <div class="file-meta">
+    <span>{{ item.kind|kind_label }}</span>
+    <span>загружено: {{ item.created_at|datetime_ru }}</span>
+    <span>{{ item.file_size|filesize }}</span>
+    <span class="status-badge status-{{ item.status }}">{{ item.status|status_label }}</span>
+  </div>
   <section class="preview-shell">
-    {% if item.kind == "video" %}
+    {% if item.status == "error" %}
+      <p class="empty visible">Ошибка обработки: {{ item.error_message }}</p>
+    {% elif item.status != "ready" %}
+      <p class="empty visible">Файл обрабатывается</p>
+    {% elif item.kind == "video" %}
       <video src="{{ url_for('uploaded_file', filename=item.stored_name) }}" controls autoplay muted playsinline></video>
     {% else %}
       <img src="{{ url_for('uploaded_file', filename=item.stored_name) }}" alt="{{ item.original_name }}">

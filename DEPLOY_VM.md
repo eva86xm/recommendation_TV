@@ -20,7 +20,7 @@ sudo docker compose up -d --build
 После запуска:
 
 - Админка: `http://IP_ВМ:8000/`
-- Плеер: `http://IP_ВМ:8000/player/main`
+- Плеер на телевизоре: `http://IP_ВМ:8000/player`
 
 ## Вариант 2: Python + systemd + Nginx
 
@@ -59,6 +59,7 @@ sudo systemctl reload nginx
 ```
 
 В файле `deploy/nginx.conf` замените `example.com` на домен или IP.
+Если планируете загружать большие видео через Nginx, оставьте `client_max_body_size 20G;`.
 
 ## Проверка
 
@@ -72,7 +73,7 @@ sudo journalctl -u signage -f
 На Smart TV, Android TV box, Raspberry Pi или мини-ПК откройте:
 
 ```text
-http://IP_ВМ/player/main
+http://IP_ВМ:8000/player
 ```
 
-Для каждого нового телевизора создайте отдельный экран в админке и откройте его ссылку плеера.
+Для каждого нового телевизора создайте отдельный экран в админке, откройте `/player` на телевизоре и введите 4-значный код экрана.

@@ -1,5 +1,6 @@
 .env
 .venv/
+recommendation_TV/
 __pycache__/
 *.pyc
 instance/*.db

@@ -14,11 +14,35 @@
     {% endif %}
   {% endwith %}
 
+  <section class="panel wide">
+    <h2>Экраны</h2>
+    <div class="table">
+      {% for screen in screens %}
+        <div class="row">
+          <div>
+            <strong>{{ screen.name }}</strong>
+            <span class="screen-code">код: <code>{{ screen.screen_key }}</code></span>
+          </div>
+          <div class="actions screen-actions">
+            <a class="button-link" href="{{ url_for('screen_detail', screen_key=screen.screen_key) }}">Настроить</a>
+            <a class="button-link secondary" href="{{ url_for('player', screen_key=screen.screen_key) }}" target="_blank">Открыть плеер</a>
+            <form method="post" action="{{ url_for('delete_screen', screen_key=screen.screen_key) }}" onsubmit="return confirm('Удалить экран и его расписание?')">
+              <button class="danger compact-button" type="submit">Удалить</button>
+            </form>
+          </div>
+        </div>
+      {% else %}
+        <p class="muted">Пока нет экранов.</p>
+      {% endfor %}
+    </div>
+  </section>
+
   <section class="panel">
     <h2>Загрузить рекламу</h2>
-    <form method="post" action="{{ url_for('upload_media') }}" enctype="multipart/form-data" class="stack">
+    <form method="post" action="{{ url_for('upload_media') }}" enctype="multipart/form-data" class="stack upload-form">
       <input type="file" name="file" accept="image/*,video/*" required>
       <button type="submit">Загрузить</button>
+      {{ upload_progress() }}
     </form>
   </section>
 
@@ -32,12 +56,22 @@
 
   <section class="panel wide">
     <h2>Загруженные файлы</h2>
-    <div class="table">
+    {{ media_filters() }}
+    <div class="table scroll-list" data-filter-list="media">
       {% for item in media %}
-        <div class="row">
-          <a href="{{ url_for('media_detail', media_id=item.id) }}">{{ item.original_name }}</a>
+        <div class="row media-row" data-kind="{{ item.kind }}" data-name="{{ item.original_name|lower }}" data-media-id="{{ item.id }}" data-media-status="{{ item.status }}">
+          <div>
+            <a href="{{ url_for('media_detail', media_id=item.id) }}">{{ item.original_name }}</a>
+            <span class="screen-code">загружено: {{ item.created_at|datetime_ru }} · {{ item.file_size|filesize }}</span>
+            {% if item.error_message %}
+              <span class="screen-code status-error-text" data-media-error>{{ item.error_message }}</span>
+            {% else %}
+              <span class="screen-code status-error-text hidden" data-media-error></span>
+            {% endif %}
+          </div>
           <div class="actions">
-            <span class="muted">{{ item.kind }}</span>
+            <span class="muted">{{ item.kind|kind_label }}</span>
+            <span class="status-badge status-{{ item.status }}" data-media-status-label>{{ item.status|status_label }}</span>
             <form method="post" action="{{ url_for('delete_media', media_id=item.id) }}" onsubmit="return confirm('Удалить файл и убрать его из расписаний?')">
               <button class="link-danger" type="submit">Удалить</button>
             </form>
@@ -48,28 +82,6 @@
       {% endfor %}
     </div>
   </section>
-
-  <section class="panel wide">
-    <h2>Экраны</h2>
-    <div class="table">
-      {% for screen in screens %}
-        <div class="row">
-          <div>
-            <strong>{{ screen.name }}</strong>
-            <span class="screen-code">код: <code>{{ screen.screen_key }}</code></span>
-          </div>
-          <div class="actions">
-            <a href="{{ url_for('screen_detail', screen_key=screen.screen_key) }}">Настроить</a>
-            <a href="{{ url_for('player', screen_key=screen.screen_key) }}" target="_blank">Открыть плеер</a>
-            <form method="post" action="{{ url_for('delete_screen', screen_key=screen.screen_key) }}" onsubmit="return confirm('Удалить экран и его расписание?')">
-              <button class="link-danger" type="submit">Удалить</button>
-            </form>
-          </div>
-        </div>
-      {% else %}
-        <p class="muted">Пока нет экранов.</p>
-      {% endfor %}
-    </div>
-  </section>
 </main>
+<script src="{{ url_for('static', filename='admin.js') }}"></script>
 {% endblock %}

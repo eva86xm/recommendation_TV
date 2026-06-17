@@ -2,6 +2,9 @@ const root = document.querySelector(".player");
 const stage = document.getElementById("stage");
 const empty = document.getElementById("empty");
 const screenKey = root.dataset.screenKey;
+const RETRY_DELAY_MS = 1500;
+const VIDEO_RELEASE_DELAY_MS = 1000;
+const EMPTY_RELOAD_DELAY_MS = 30000;
 
 let playlist = [];
 let currentIndex = 0;
@@ -11,23 +14,30 @@ let activeVideo = null;
 let playbackToken = 0;
 
 async function loadPlaylist() {
-  const response = await fetch(`/api/player/${screenKey}/playlist`, { cache: "no-store" });
-  const data = await response.json();
-  playlist = data.items || [];
-  currentIndex = 0;
-  playCurrent();
+  try {
+    const response = await fetch(`/api/player/${screenKey}/playlist`, { cache: "no-store" });
+    const data = await response.json();
+    playlist = data.items || [];
+    currentIndex = 0;
+    playCurrent();
+  } catch (error) {
+    playlist = [];
+    empty.classList.add("visible");
+    slideTimer = setTimeout(loadPlaylist, EMPTY_RELOAD_DELAY_MS);
+  }
 }
 
 function playCurrent() {
   clearTimeout(slideTimer);
   clearTimeout(retryTimer);
+  releaseVideo(activeVideo);
   playbackToken += 1;
   activeVideo = null;
   stage.innerHTML = "";
 
   if (!playlist.length) {
     empty.classList.add("visible");
-    slideTimer = setTimeout(loadPlaylist, 30000);
+    slideTimer = setTimeout(loadPlaylist, EMPTY_RELOAD_DELAY_MS);
     return;
   }
 
@@ -54,8 +64,8 @@ function playCurrent() {
     element.onerror = () => {
       finishVideo(element);
     };
-    element.oncanplay = () => startVideo(element, item);
-    element.onloadedmetadata = () => startVideo(element, item);
+    element.oncanplay = () => startVideo(element);
+    element.onloadedmetadata = () => startVideo(element);
   } else {
     element.onload = () => {
       slideTimer = setTimeout(next, Math.max(1, item.durationSeconds || 10) * 1000);
@@ -69,11 +79,11 @@ function playCurrent() {
   if (item.kind === "video") {
     activeVideo = element;
     element.load();
-    startVideo(element, item);
+    startVideo(element);
   }
 }
 
-function startVideo(video, item) {
+function startVideo(video) {
   if (!video || video.dataset.started === "1") {
     return;
   }
@@ -102,11 +112,13 @@ function startVideo(video, item) {
         video.dataset.started = "1";
       }).catch(() => {
         if (tries < 8) {
-          retryTimer = setTimeout(tryPlay, 1500);
+          retryTimer = setTimeout(tryPlay, RETRY_DELAY_MS);
         } else {
           slideTimer = setTimeout(next, 3000);
         }
       });
+    } else {
+      video.dataset.started = "1";
     }
   };
 
@@ -127,6 +139,20 @@ function finishVideo(video) {
 
   video.dataset.finished = "1";
   clearTimeout(retryTimer);
+  releaseVideo(video);
+
+  if (video === activeVideo) {
+    activeVideo = null;
+  }
+
+  stage.innerHTML = "";
+  slideTimer = setTimeout(next, VIDEO_RELEASE_DELAY_MS);
+}
+
+function releaseVideo(video) {
+  if (!video || video.tagName !== "VIDEO") {
+    return;
+  }
 
   try {
     video.pause();
@@ -135,13 +161,6 @@ function finishVideo(video) {
   } catch (error) {
     // Some TV browsers throw while tearing down media. Moving on is safer.
   }
-
-  if (video === activeVideo) {
-    activeVideo = null;
-  }
-
-  stage.innerHTML = "";
-  slideTimer = setTimeout(next, 1000);
 }
 
 function withPlaybackToken(url) {

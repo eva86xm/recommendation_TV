@@ -18,6 +18,24 @@
       </div>
     </div>
   {%- endmacro %}
+  {% macro upload_progress() -%}
+    <div class="upload-progress hidden" aria-live="polite">
+      <div class="upload-progress-bar">
+        <span></span>
+      </div>
+      <div class="upload-progress-text">Подготовка загрузки...</div>
+    </div>
+  {%- endmacro %}
+  {% macro media_filters() -%}
+    <div class="list-tools" data-filter-controls>
+      <input type="search" data-filter-search placeholder="Поиск по названию">
+      <div class="segmented" role="group" aria-label="Фильтр файлов">
+        <button type="button" class="active" data-filter-kind="all">Все</button>
+        <button type="button" data-filter-kind="video">Видео</button>
+        <button type="button" data-filter-kind="image">Фото</button>
+      </div>
+    </div>
+  {%- endmacro %}
   {% block body %}{% endblock %}
 </body>
 </html>

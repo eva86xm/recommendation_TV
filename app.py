@@ -3,6 +3,7 @@ import secrets
 import shutil
 import sqlite3
 import subprocess
+import threading
 from datetime import datetime, time
 from pathlib import Path
 
@@ -15,12 +16,21 @@ DB_PATH = BASE_DIR / "instance" / "signage.db"
 UPLOAD_DIR = BASE_DIR / "uploads"
 ALLOWED_EXTENSIONS = {"jpg", "jpeg", "png", "gif", "webp", "mp4", "webm", "mov"}
 VIDEO_EXTENSIONS = {"mp4", "webm", "mov"}
+MAX_VIDEO_WIDTH = int(os.getenv("MAX_VIDEO_WIDTH", "2560"))
+MAX_VIDEO_HEIGHT = int(os.getenv("MAX_VIDEO_HEIGHT", "1440"))
+READY_STATUS = "ready"
+PROCESSING_STATUS = "processing"
+ERROR_STATUS = "error"
 
 
 def create_app():
     app = Flask(__name__)
     app.secret_key = os.getenv("SECRET_KEY", secrets.token_hex(32))
-    app.config["MAX_CONTENT_LENGTH"] = int(os.getenv("MAX_UPLOAD_MB", "300")) * 1024 * 1024
+    app.config["MAX_CONTENT_LENGTH"] = int(os.getenv("MAX_UPLOAD_MB", "20480")) * 1024 * 1024
+    app.jinja_env.filters["datetime_ru"] = format_datetime_ru
+    app.jinja_env.filters["filesize"] = format_file_size
+    app.jinja_env.filters["kind_label"] = media_kind_label
+    app.jinja_env.filters["status_label"] = media_status_label
 
     BASE_DIR.joinpath("instance").mkdir(exist_ok=True)
     UPLOAD_DIR.mkdir(exist_ok=True)
@@ -73,28 +83,40 @@ def create_app():
             flash("Поддерживаются картинки и видео: jpg, png, webp, gif, mp4, webm, mov")
             return redirect(next_url)
 
-        original_name = secure_filename(file.filename)
-        kind = "video" if ext in VIDEO_EXTENSIONS else "image"
-        stored_ext = "mp4" if kind == "video" else ext
-        stored_name = f"{datetime.utcnow().strftime('%Y%m%d%H%M%S')}_{secrets.token_hex(6)}.{stored_ext}"
+        original_name = display_filename(file.filename)
+        kind = media_kind(ext)
+        stored_name = make_stored_name("mp4" if kind == "video" else ext)
         stored_path = UPLOAD_DIR / stored_name
+        source_name = None
+        status = READY_STATUS
+        file_size = 0
 
-        if kind == "video":
-            source_path = UPLOAD_DIR / f"{stored_path.stem}_source.{ext}"
-            file.save(source_path)
-            if convert_video_for_tv(source_path, stored_path):
-                source_path.unlink(missing_ok=True)
-            else:
-                source_path.replace(stored_path)
-        else:
+        if kind == "image":
             file.save(stored_path)
+            file_size = stored_path.stat().st_size
+        else:
+            source_name = f"{stored_path.stem}_source.{ext}"
+            source_path = UPLOAD_DIR / source_name
+            file.save(source_path)
+            file_size = source_path.stat().st_size
+            status = PROCESSING_STATUS
 
         with db() as conn:
-            conn.execute(
-                "INSERT INTO media (original_name, stored_name, kind, created_at) VALUES (?, ?, ?, ?)",
-                (original_name, stored_name, kind, datetime.utcnow().isoformat()),
+            cursor = conn.execute(
+                """
+                INSERT INTO media
+                    (original_name, stored_name, source_name, kind, status, file_size, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (original_name, stored_name, source_name, kind, status, file_size, utc_now_iso()),
             )
-        flash("Файл загружен")
+            media_id = cursor.lastrowid
+
+        if kind == "video":
+            start_video_processing(media_id, source_name, stored_name)
+            flash("Видео загружено и обрабатывается")
+        else:
+            flash("Файл загружен")
         return redirect(next_url)
 
     @app.get("/media/<int:media_id>")
@@ -117,9 +139,7 @@ def create_app():
             conn.execute("DELETE FROM schedule_items WHERE media_id = ?", (media_id,))
             conn.execute("DELETE FROM media WHERE id = ?", (media_id,))
 
-        file_path = UPLOAD_DIR / item["stored_name"]
-        if file_path.exists():
-            file_path.unlink()
+        delete_media_files(item)
 
         flash("Файл удален")
         return redirect(next_url)
@@ -129,9 +149,16 @@ def create_app():
         require_login()
         form = request.form
         media_id = int(form["media_id"])
-        screen = find_screen_by_id(int(form["screen_id"]))
+        screen_id = int(form["screen_id"])
+        screen = find_screen_by_id(screen_id)
         media_item = find_media(media_id)
-        duration_seconds = 0 if media_item and media_item["kind"] == "video" else int(form.get("duration_seconds") or 10)
+        if not screen or not media_item:
+            abort(404)
+        if media_item["status"] != READY_STATUS:
+            flash("Этот файл еще обрабатывается")
+            return redirect(url_for("screen_detail", screen_key=screen["screen_key"]))
+
+        duration_seconds = schedule_duration(form, media_item)
         with db() as conn:
             conn.execute(
                 """
@@ -140,7 +167,7 @@ def create_app():
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    int(form["screen_id"]),
+                    screen_id,
                     media_id,
                     form.get("title", "").strip(),
                     duration_seconds,
@@ -189,7 +216,7 @@ def create_app():
             return redirect(url_for("index"))
         with db() as conn:
             key = generate_screen_key(conn)
-            conn.execute("INSERT INTO screens (name, screen_key, created_at) VALUES (?, ?, ?)", (name, key, datetime.utcnow().isoformat()))
+            conn.execute("INSERT INTO screens (name, screen_key, created_at) VALUES (?, ?, ?)", (name, key, utc_now_iso()))
         flash("Экран добавлен")
         return redirect(url_for("index"))
 
@@ -220,9 +247,13 @@ def create_app():
             abort(404)
         with db() as conn:
             media = conn.execute("SELECT * FROM media ORDER BY created_at DESC").fetchall()
+            ready_media = conn.execute(
+                "SELECT * FROM media WHERE status = ? ORDER BY created_at DESC",
+                (READY_STATUS,),
+            ).fetchall()
             schedule = conn.execute(
                 """
-                SELECT s.*, m.original_name, m.kind
+                SELECT s.*, m.original_name, m.kind, m.status
                 FROM schedule_items s
                 JOIN media m ON m.id = s.media_id
                 WHERE s.screen_id = ?
@@ -230,7 +261,7 @@ def create_app():
                 """,
                 (screen["id"],),
             ).fetchall()
-        return render_template("screen.html", screen=screen, media=media, schedule=schedule)
+        return render_template("screen.html", screen=screen, media=media, ready_media=ready_media, schedule=schedule)
 
     @app.route("/player", methods=["GET", "POST"])
     def player_lookup():
@@ -258,13 +289,13 @@ def create_app():
         with db() as conn:
             rows = conn.execute(
                 """
-                SELECT s.*, m.stored_name, m.original_name, m.kind
+                SELECT s.*, m.stored_name, m.original_name, m.kind, m.status
                 FROM schedule_items s
                 JOIN media m ON m.id = s.media_id
-                WHERE s.active = 1 AND s.screen_id = ?
+                WHERE s.active = 1 AND s.screen_id = ? AND m.status = ?
                 ORDER BY s.sort_order ASC, s.id ASC
                 """,
-                (screen["id"],),
+                (screen["id"], READY_STATUS),
             ).fetchall()
 
         items = [row_to_playlist_item(row) for row in rows if is_active_now(row, now)]
@@ -274,24 +305,44 @@ def create_app():
     def uploaded_file(filename):
         return send_from_directory(UPLOAD_DIR, filename)
 
+    @app.get("/api/media/status")
+    def media_status():
+        require_login()
+        with db() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, status, error_message, processed_at
+                FROM media
+                ORDER BY created_at DESC
+                """
+            ).fetchall()
+        return jsonify({"items": [dict(row) for row in rows]})
+
     return app
 
 
 def db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
     return conn
 
 
 def init_db():
     with db() as conn:
+        conn.execute("PRAGMA journal_mode = WAL")
         conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS media (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 original_name TEXT NOT NULL,
                 stored_name TEXT NOT NULL,
+                source_name TEXT,
                 kind TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'ready',
+                file_size INTEGER NOT NULL DEFAULT 0,
+                error_message TEXT,
+                processed_at TEXT,
                 created_at TEXT NOT NULL
             );
 
@@ -325,11 +376,28 @@ def init_db():
         if exists == 0:
             conn.execute(
                 "INSERT INTO screens (name, screen_key, created_at) VALUES (?, ?, ?)",
-                ("Главный экран", generate_screen_key(conn), datetime.utcnow().isoformat()),
+                ("Главный экран", generate_screen_key(conn), utc_now_iso()),
             )
 
-        columns = {row["name"] for row in conn.execute("PRAGMA table_info(schedule_items)").fetchall()}
-        if "screen_id" not in columns:
+        media_columns = {row["name"] for row in conn.execute("PRAGMA table_info(media)").fetchall()}
+        if "source_name" not in media_columns:
+            conn.execute("ALTER TABLE media ADD COLUMN source_name TEXT")
+        if "status" not in media_columns:
+            conn.execute("ALTER TABLE media ADD COLUMN status TEXT NOT NULL DEFAULT 'ready'")
+        if "file_size" not in media_columns:
+            conn.execute("ALTER TABLE media ADD COLUMN file_size INTEGER NOT NULL DEFAULT 0")
+        if "error_message" not in media_columns:
+            conn.execute("ALTER TABLE media ADD COLUMN error_message TEXT")
+        if "processed_at" not in media_columns:
+            conn.execute("ALTER TABLE media ADD COLUMN processed_at TEXT")
+        conn.execute("UPDATE media SET status = 'ready' WHERE status IS NULL OR status = ''")
+        for row in conn.execute("SELECT id, stored_name FROM media WHERE file_size = 0 OR file_size IS NULL").fetchall():
+            file_path = UPLOAD_DIR / row["stored_name"]
+            if file_path.exists():
+                conn.execute("UPDATE media SET file_size = ? WHERE id = ?", (file_path.stat().st_size, row["id"]))
+
+        schedule_columns = {row["name"] for row in conn.execute("PRAGMA table_info(schedule_items)").fetchall()}
+        if "screen_id" not in schedule_columns:
             conn.execute("ALTER TABLE schedule_items ADD COLUMN screen_id INTEGER")
             main_screen = conn.execute("SELECT id FROM screens WHERE screen_key = ?", ("main",)).fetchone()
             if main_screen:
@@ -362,24 +430,145 @@ def find_media(media_id):
         return conn.execute("SELECT * FROM media WHERE id = ?", (media_id,)).fetchone()
 
 
+def format_datetime_ru(value):
+    if not value:
+        return ""
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return value
+    return parsed.strftime("%d.%m.%Y %H:%M")
+
+
+def format_file_size(value):
+    try:
+        size = int(value or 0)
+    except (TypeError, ValueError):
+        size = 0
+
+    if size >= 1024 * 1024 * 1024:
+        return f"{size / 1024 / 1024 / 1024:.1f} ГБ"
+    if size >= 1024 * 1024:
+        return f"{size / 1024 / 1024:.1f} МБ"
+    if size >= 1024:
+        return f"{size / 1024:.0f} КБ"
+    return f"{size} Б"
+
+
+def media_kind_label(value):
+    return "видео" if value == "video" else "фото"
+
+
+def media_status_label(value):
+    labels = {
+        READY_STATUS: "готово",
+        PROCESSING_STATUS: "обрабатывается",
+        ERROR_STATUS: "ошибка",
+    }
+    return labels.get(value or READY_STATUS, "готово")
+
+
+def utc_now_iso():
+    return datetime.utcnow().isoformat()
+
+
+def display_filename(filename):
+    name = Path(filename.replace("\\", "/")).name.strip()
+    return name or secure_filename(filename) or "media"
+
+
+def media_kind(ext):
+    return "video" if ext in VIDEO_EXTENSIONS else "image"
+
+
+def make_stored_name(ext):
+    timestamp = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+    return f"{timestamp}_{secrets.token_hex(6)}.{ext}"
+
+
+def delete_media_files(item):
+    names = {item["stored_name"]}
+    if "source_name" in item.keys() and item["source_name"]:
+        names.add(item["source_name"])
+
+    for name in names:
+        file_path = UPLOAD_DIR / name
+        if file_path.exists():
+            file_path.unlink()
+
+
+def start_video_processing(media_id, source_name, stored_name):
+    thread = threading.Thread(
+        target=process_video_for_tv,
+        args=(media_id, source_name, stored_name),
+        daemon=True,
+    )
+    thread.start()
+
+
+def process_video_for_tv(media_id, source_name, stored_name):
+    source_path = UPLOAD_DIR / source_name
+    output_path = UPLOAD_DIR / stored_name
+
+    if not source_path.exists():
+        mark_media_error(media_id, "Исходный файл не найден")
+        return
+
+    converted, error = convert_video_for_tv(source_path, output_path)
+    if converted:
+        if not find_media(media_id):
+            source_path.unlink(missing_ok=True)
+            output_path.unlink(missing_ok=True)
+            return
+
+        source_path.unlink(missing_ok=True)
+        with db() as conn:
+            conn.execute(
+                """
+                UPDATE media
+                SET status = ?, source_name = NULL, file_size = ?, error_message = NULL, processed_at = ?
+                WHERE id = ?
+                """,
+                (READY_STATUS, output_path.stat().st_size, utc_now_iso(), media_id),
+            )
+        return
+
+    output_path.unlink(missing_ok=True)
+    mark_media_error(media_id, error or "Не удалось подготовить видео")
+
+
+def mark_media_error(media_id, message):
+    with db() as conn:
+        conn.execute(
+            "UPDATE media SET status = ?, error_message = ?, processed_at = ? WHERE id = ?",
+            (ERROR_STATUS, message, utc_now_iso(), media_id),
+        )
+
+
+def schedule_duration(form, media_item):
+    if media_item["kind"] == "video":
+        return 0
+    return max(1, int(form.get("duration_seconds") or 10))
+
+
 def convert_video_for_tv(source_path, output_path):
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
-        return False
+        return False, "ffmpeg не установлен"
 
     command = [
         ffmpeg,
         "-y",
         "-i",
         str(source_path),
+        "-vf",
+        f"scale={MAX_VIDEO_WIDTH}:{MAX_VIDEO_HEIGHT}:force_original_aspect_ratio=decrease,format=yuv420p",
         "-c:v",
         "libx264",
-        "-pix_fmt",
-        "yuv420p",
         "-preset",
         "veryfast",
         "-crf",
-        "23",
+        "24",
         "-c:a",
         "aac",
         "-b:a",
@@ -389,8 +578,16 @@ def convert_video_for_tv(source_path, output_path):
         str(output_path),
     ]
 
-    result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    return result.returncode == 0 and output_path.exists()
+    try:
+        result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, timeout=None)
+    except OSError as exc:
+        return False, str(exc)
+
+    if result.returncode == 0 and output_path.exists() and output_path.stat().st_size > 0:
+        return True, None
+
+    error = (result.stderr or "").strip().splitlines()
+    return False, error[-1] if error else "ffmpeg завершился с ошибкой"
 
 
 def is_four_digit_code(value):
