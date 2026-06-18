@@ -328,6 +328,10 @@ p {
   font-size: 13px;
 }
 
+.scan-form {
+  margin-top: 12px;
+}
+
 .notice {
   background: #ecfdf3;
   border: 1px solid #abefc6;

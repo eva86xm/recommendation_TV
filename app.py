@@ -119,6 +119,22 @@ def create_app():
             flash("Файл загружен")
         return redirect(next_url)
 
+    @app.post("/media/scan")
+    def scan_media_folder():
+        require_login()
+        next_url = request.form.get("next") or url_for("index")
+        result = import_media_from_uploads()
+
+        if result["added"] == 0:
+            flash("Новых файлов для загрузки из папки uploads не найдено")
+        else:
+            flash(
+                f"Загружено из папки uploads: {result['added']}. "
+                f"Видео в обработке: {result['processing']}. "
+                f"Пропущено: {result['skipped']}."
+            )
+        return redirect(next_url)
+
     @app.get("/media/<int:media_id>")
     def media_detail(media_id):
         require_login()
@@ -428,6 +444,71 @@ def find_screen_by_id(screen_id):
 def find_media(media_id):
     with db() as conn:
         return conn.execute("SELECT * FROM media WHERE id = ?", (media_id,)).fetchone()
+
+
+def import_media_from_uploads():
+    added = 0
+    processing = 0
+    skipped = 0
+    videos_to_process = []
+
+    with db() as conn:
+        registered_names = set()
+        for row in conn.execute("SELECT stored_name, source_name FROM media").fetchall():
+            if row["stored_name"]:
+                registered_names.add(row["stored_name"])
+            if row["source_name"]:
+                registered_names.add(row["source_name"])
+
+        for file_path in sorted(UPLOAD_DIR.iterdir(), key=lambda item: item.name.lower()):
+            if not file_path.is_file() or file_path.name.startswith("."):
+                continue
+
+            ext = file_path.suffix.lower().lstrip(".")
+            if ext not in ALLOWED_EXTENSIONS:
+                skipped += 1
+                continue
+
+            if file_path.name in registered_names or file_path.stem.endswith("_source"):
+                skipped += 1
+                continue
+
+            kind = media_kind(ext)
+            original_name = display_filename(file_path.name)
+            file_size = file_path.stat().st_size
+
+            if kind == "image":
+                cursor = conn.execute(
+                    """
+                    INSERT INTO media
+                        (original_name, stored_name, source_name, kind, status, file_size, created_at)
+                    VALUES (?, ?, NULL, ?, ?, ?, ?)
+                    """,
+                    (original_name, file_path.name, kind, READY_STATUS, file_size, utc_now_iso()),
+                )
+                registered_names.add(file_path.name)
+                added += 1
+                continue
+
+            stored_name = make_stored_name("mp4")
+            cursor = conn.execute(
+                """
+                INSERT INTO media
+                    (original_name, stored_name, source_name, kind, status, file_size, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (original_name, stored_name, file_path.name, kind, PROCESSING_STATUS, file_size, utc_now_iso()),
+            )
+            registered_names.add(file_path.name)
+            registered_names.add(stored_name)
+            videos_to_process.append((cursor.lastrowid, file_path.name, stored_name))
+            added += 1
+            processing += 1
+
+    for media_id, source_name, stored_name in videos_to_process:
+        start_video_processing(media_id, source_name, stored_name)
+
+    return {"added": added, "processing": processing, "skipped": skipped}
 
 
 def format_datetime_ru(value):
